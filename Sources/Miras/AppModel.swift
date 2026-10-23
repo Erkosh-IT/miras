@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     private var workflowTasks: [UUID: Task<Void, Never>] = [:]
     @Published private(set) var steamSessions: [UUID: LaunchSettings] = [:]
     private var steamProcesses: [UUID: Process] = [:]
+    private var steamSessionIDs: [UUID: UUID] = [:]
     @Published private(set) var stopping: Set<UUID> = []
     var runtimeLocked: Bool { !busy.isEmpty || !steamSessions.isEmpty || !stopping.isEmpty }
 
@@ -177,6 +178,8 @@ final class AppModel: ObservableObject {
         var mods = ModSettings()
         mods.steamExecutable = options.mods.steamExecutable
         options.modSettings = mods
+        options.diagnosticsEnabled = nil
+        options.dependencies = Array(Set(options.dependencies)).sorted { $0.rawValue < $1.rawValue }
         return options
     }
 
@@ -199,11 +202,23 @@ final class AppModel: ObservableObject {
                     try await checkedRun(wait, log: log)
                 }
                 if game.options.graphics == .dxvk {
-                    try GraphicsRuntime.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+                    try await prepareDXVK(configuration: configuration, prefix: prefix, log: log)
                 }
             }
             try Task.checkCancellation()
-            steamProcesses[bottle.id] = try Runner.start(command, log: log)
+            if steamSessionIDs[bottle.id] == nil {
+                let sessionID = UUID()
+                let process = try Runner.start(command, log: log) { [weak self] code in
+                    Task { @MainActor in
+                        await self?.finishSteamSession(bottle: bottle, sessionID: sessionID, engine: selectedEngine, log: log, exitCode: code)
+                    }
+                }
+                steamSessionIDs[bottle.id] = sessionID
+                steamProcesses[bottle.id] = process
+            } else {
+                // A URL request uses Steam's IPC; do not add another session watcher.
+                _ = try Runner.start(command, log: log)
+            }
             steamSessions[bottle.id] = profile
         }
     }
@@ -233,10 +248,11 @@ final class AppModel: ObservableObject {
                     try await checkedRun(wait, log: log)
                 }
                 if game.options.graphics == .dxvk {
-                    try GraphicsRuntime.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+                    try await prepareDXVK(configuration: configuration, prefix: prefix, log: log)
                 }
             }
             status = "Running \(game.name)…"
+            try Task.checkCancellation()
             let code = try await Runner.run(launch, log: log)
             // Keep the bottle locked even when Steam or another launcher detaches.
             if session == nil { try await checkedRun(wait, log: log) }
@@ -249,6 +265,34 @@ final class AppModel: ObservableObject {
         let code = try await Runner.run(command, log: log)
         try Task.checkCancellation()
         guard code == 0 else { throw ConfigurationError("\(command.executable.lastPathComponent) exited with code \(code).") }
+    }
+
+    private func prepareDXVK(configuration: RuntimeConfiguration, prefix: URL, log: URL) async throws {
+        status = "Checking graphics libraries…"
+        let report = try await RuntimePreparation.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+        try Task.checkCancellation()
+        if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
+        let handle = try FileHandle(forWritingTo: log)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("[Miras] DXVK: \(report.filesCopied) copied, \(report.filesSkipped) unchanged, \(report.bytesCopied) bytes written\n".utf8))
+    }
+
+    private func finishSteamSession(bottle: Bottle, sessionID: UUID, engine: URL, log: URL, exitCode: Int32) async {
+        guard steamSessionIDs[bottle.id] == sessionID else { return }
+        do {
+            // Steam can detach from its loader; unlock only after the prefix exits.
+            // wineserver waits off-thread, without polling.
+            let code = try await Runner.run(WineCommand.wait(engine: engine, prefix: store.prefix(for: bottle)), log: log)
+            guard code == 0, steamSessionIDs[bottle.id] == sessionID else { return }
+            steamSessions.removeValue(forKey: bottle.id)
+            steamProcesses.removeValue(forKey: bottle.id)
+            steamSessionIDs.removeValue(forKey: bottle.id)
+            if exitCode != 0 { errorMessage = "Steam exited with code \(exitCode). See \(log.path)." }
+        } catch {
+            // Keep the session locked if its termination cannot be confirmed.
+            if steamSessionIDs[bottle.id] == sessionID { errorMessage = error.localizedDescription }
+        }
     }
 
     private func workflow(bottle: Bottle, title: String, operation: @escaping @MainActor (URL) async throws -> Void) {
@@ -285,6 +329,7 @@ final class AppModel: ObservableObject {
                         try await checkedRun(WineCommand.wait(engine: engine, prefix: store.prefix(for: bottle)), log: log)
                         steamSessions.removeValue(forKey: bottle.id)
                         steamProcesses.removeValue(forKey: bottle.id)
+                        steamSessionIDs.removeValue(forKey: bottle.id)
                         status = "Stopped programs in \(bottle.name)."
                     }
                 } catch { errorMessage = error.localizedDescription }

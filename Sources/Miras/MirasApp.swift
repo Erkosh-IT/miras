@@ -263,6 +263,8 @@ struct GameEditor: View {
                 ForEach(Synchronization.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             Toggle("Launch x86_64 Wine (Rosetta on Apple silicon)", isOn: $game.options.rosetta)
+            Toggle("Extra Wine diagnostics (for troubleshooting)", isOn: $game.options.diagnostics)
+            Text("Normally, Miras records errors and suppresses routine Wine debug messages.").font(.caption).foregroundStyle(.secondary)
             Text("Mod DLL overrides: one name=mode per line (n = native, b = built-in)").font(.caption)
             TextEditor(text: $game.options.mods.dllOverrides).font(.system(.body, design: .monospaced)).frame(height: 70)
             TextField("Steam.exe path inside this bottle (blank = default)", text: $game.options.mods.steamExecutable)

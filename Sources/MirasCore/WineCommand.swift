@@ -40,6 +40,8 @@ public struct WineCommand {
         var command = try WineCommand(engine: engine, prefix: prefix, arguments: [game.executable] + game.arguments,
                                workingDirectory: URL(fileURLWithPath: game.executable).deletingLastPathComponent())
         let options = game.options
+        // Retain error diagnostics while avoiding Wine's routine fixme/trace traffic.
+        command.environment["WINEDEBUG"] = options.diagnostics ? "-all,err+all,warn+all,fixme+all" : "-all,err+all"
         let customOverrides = try options.mods.overrides()
         let extensionName = URL(fileURLWithPath: game.executable).pathExtension.lowercased()
         let isBatch = ["bat", "cmd"].contains(extensionName)
@@ -118,7 +120,7 @@ public struct WineCommand {
         let uri = try game.options.mods.validatedSteamURL()
         let gameCommand = try launch(engine: engine, prefix: prefix, game: game, configuration: configuration)
         var command = try WineCommand(engine: engine, prefix: prefix, arguments: [steam.path] + (uri.map { [$0] } ?? ["-silent"]), workingDirectory: steam.deletingLastPathComponent())
-        for key in ["WINEESYNC", "WINEMSYNC", "WINEFSYNC"] { command.environment[key] = gameCommand.environment[key] }
+        for key in ["WINEESYNC", "WINEMSYNC", "WINEFSYNC", "WINEDEBUG"] { command.environment[key] = gameCommand.environment[key] }
         // The game's mod DLLs must not be injected into the Steam client.
         command.environment.removeValue(forKey: "WINEDLLOVERRIDES")
         if game.options.rosetta {

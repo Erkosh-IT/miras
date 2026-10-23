@@ -104,6 +104,82 @@ final class RuntimeTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: original), Data("dxvk".utf8))
         XCTAssertEqual(try Data(contentsOf: prefix.appendingPathComponent(".miras-dll-backups/system32/d3d11.dll")), Data("original".utf8))
     }
+    func testUnchangedDXVKSkipsWritesAndRepairsChangedFiles() throws {
+        let source = try file("package/x64/d3d11.dll", data: Data(repeating: 7, count: 150_000))
+        try file("package/x64/dxgi.dll")
+        let target = try file("prefix/drive_c/windows/system32/d3d11.dll")
+        let prefix = root.appendingPathComponent("prefix")
+        let package = root.appendingPathComponent("package")
+        let first = try GraphicsRuntime.installDXVK(from: package, prefix: prefix)
+        XCTAssertEqual(first.filesCopied, 2)
+        let timestamp = Date(timeIntervalSince1970: 1_000)
+        try FileManager.default.setAttributes([.modificationDate: timestamp], ofItemAtPath: target.path)
+        let second = try GraphicsRuntime.installDXVK(from: package, prefix: prefix)
+        XCTAssertEqual(second.filesCopied, 0)
+        XCTAssertEqual(second.bytesCopied, 0)
+        XCTAssertEqual(second.filesSkipped, 2)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: target.path)[.modificationDate] as? Date, timestamp)
+        // Same-size corruption must not be mistaken for an unchanged file.
+        try Data(repeating: 8, count: 150_000).write(to: target)
+        let repaired = try GraphicsRuntime.installDXVK(from: package, prefix: prefix)
+        XCTAssertEqual(repaired.filesCopied, 1)
+        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: source))
+        try Data(repeating: 9, count: 150_000).write(to: source)
+        XCTAssertEqual(try GraphicsRuntime.installDXVK(from: package, prefix: prefix).filesCopied, 1)
+    }
+    func testPEHeadersRejectTruncationAndHandleLargeExecutables() throws {
+        let executable = try pe("x64")
+        let writer = try FileHandle(forWritingTo: executable)
+        try writer.truncate(atOffset: 128 * 1024 * 1024)
+        try writer.close()
+        XCTAssertEqual(try GraphicsRuntime.architecture(of: executable), "x64")
+        var malformed = Data(repeating: 0, count: 64)
+        malformed[0] = 0x4d; malformed[1] = 0x5a
+        malformed[60] = 0xff; malformed[61] = 0xff; malformed[62] = 0xff; malformed[63] = 0xff
+        try malformed.write(to: executable)
+        XCTAssertThrowsError(try GraphicsRuntime.architecture(of: executable))
+    }
+    func testQuietLoggingRetainsErrorsAndDiagnosticsCanBeEnabled() throws {
+        let engine = try file("wine", executable: true)
+        var game = Game(bottleID: UUID(), name: "Game", executable: try pe("x64").path)
+        XCTAssertEqual(try WineCommand.launch(engine: engine, prefix: root, game: game).environment["WINEDEBUG"], "-all,err+all")
+        game.options.diagnostics = true
+        XCTAssertEqual(try WineCommand.launch(engine: engine, prefix: root, game: game).environment["WINEDEBUG"], "-all,err+all,warn+all,fixme+all")
+    }
+    func testCancelledPreparationDoesNotWriteDLLs() async throws {
+        let package = root.appendingPathComponent("package")
+        let prefix = root.appendingPathComponent("prefix")
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await RuntimePreparation.installDXVK(from: package, prefix: prefix)
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prefix.path))
+    }
+    func testProcessRunnerReportsExitAndAppendsLogs() async throws {
+        let log = root.appendingPathComponent("process.log")
+        try Data("existing\n".utf8).write(to: log)
+        let command = try WineCommand(engine: URL(fileURLWithPath: "/bin/sh"), prefix: root,
+                                      arguments: ["-c", "printf captured-output; exit 7"])
+        let code = try await ProcessRunner.run(command, log: log)
+        XCTAssertEqual(code, 7)
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.hasPrefix("existing\n"))
+        XCTAssertTrue(text.contains("captured-output"))
+        XCTAssertTrue(text.contains("Process exited 7 after"))
+    }
+    func testCancelledRunnerDoesNotStartProcess() async throws {
+        let log = root.appendingPathComponent("never-started.log")
+        let command = try WineCommand(engine: URL(fileURLWithPath: "/bin/sh"), prefix: root, arguments: ["-c", "exit 0"])
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ProcessRunner.run(command, log: log)
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+    }
     func testMissingDXVKDLLFailsBeforeChangingPrefix() throws {
         try file("package/x64/d3d11.dll", data: Data("new".utf8))
         let original = try file("prefix/drive_c/windows/system32/d3d11.dll")
