@@ -180,6 +180,20 @@ final class RuntimeTests: XCTestCase {
         catch is CancellationError { }
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
     }
+    func testConcurrentProcessOutputDoesNotOverwriteLogs() async throws {
+        let log = root.appendingPathComponent("shared.log")
+        let a = try WineCommand(engine: URL(fileURLWithPath: "/bin/sh"), prefix: root,
+                                arguments: ["-c", Array(repeating: "printf 'A\\n'", count: 200).joined(separator: ";")])
+        let b = try WineCommand(engine: URL(fileURLWithPath: "/bin/sh"), prefix: root,
+                                arguments: ["-c", Array(repeating: "printf 'B\\n'", count: 200).joined(separator: ";")])
+        async let first = ProcessRunner.run(a, log: log)
+        async let second = ProcessRunner.run(b, log: log)
+        let codes = try await [first, second]
+        XCTAssertEqual(codes, [0, 0])
+        let lines = try String(contentsOf: log, encoding: .utf8).components(separatedBy: .newlines)
+        XCTAssertEqual(lines.filter { $0 == "A" }.count, 200)
+        XCTAssertEqual(lines.filter { $0 == "B" }.count, 200)
+    }
     func testMissingDXVKDLLFailsBeforeChangingPrefix() throws {
         try file("package/x64/d3d11.dll", data: Data("new".utf8))
         let original = try file("prefix/drive_c/windows/system32/d3d11.dll")

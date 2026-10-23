@@ -1,17 +1,18 @@
 import Foundation
+import Darwin
 
 /// File-backed output avoids pipe backpressure and polling while games run.
 public enum ProcessRunner {
     public static func start(_ command: WineCommand, log: URL,
                       onExit: @escaping @Sendable (Int32) -> Void = { _ in }) throws -> Process {
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: log.path) {
-            FileManager.default.createFile(atPath: log.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: log)
+        // O_APPEND makes each write append atomically even when detached Windows
+        // children and the wineserver watcher keep writing to the same log.
+        let descriptor = Darwin.open(log.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o600))
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         let process = Process()
         do {
-            try handle.seekToEnd()
             try handle.write(contentsOf: Data("\n[Miras] Starting \(command.executable.lastPathComponent)\n".utf8))
             process.executableURL = command.executable
             process.arguments = command.arguments
