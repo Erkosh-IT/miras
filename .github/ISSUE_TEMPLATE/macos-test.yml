@@ -1,0 +1,82 @@
+name: macOS test report
+description: Report a successful test, a failed launch, or a compatibility issue.
+title: "[macOS test] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Miras! Successful results help too.
+        Follow docs/TESTING.md and remove personal information from logs before posting.
+  - type: input
+    id: build
+    attributes:
+      label: Miras release or commit
+      placeholder: "v0.1.0-alpha.1 / c23dc98 / workflow link"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Mac model, chip, and RAM
+      placeholder: "MacBook Air M2, 16 GB RAM"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Copy the version from About This Mac.
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: What did you test?
+      options:
+        - App opening and interface only
+        - Engine selection and bottle creation
+        - Windows configuration or simple executable
+        - Windows installer
+        - Game or graphics backend
+        - Steam session
+        - Mod launcher
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Result
+      options:
+        - Worked as expected
+        - Partly worked
+        - Failed or crashed
+        - Blocked by macOS before launch
+    validations:
+      required: true
+  - type: textarea
+    id: runtime
+    attributes:
+      label: Wine and runtime configuration
+      description: "Publisher, exact Wine version/source, graphics backend, synchronization, Rosetta, dependencies, and mods. For interface-only tests, write 'No Wine used'."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and expected result
+      description: Include the application/game version and any launch arguments. Explain enough for another tester to repeat it.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Include exact errors, whether the app recovered, and screenshots if useful. Performance reports should include resolution/settings and test duration.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste a redacted excerpt or attach a .log file. Include the exact macOS alert if opening was blocked.
+      render: text

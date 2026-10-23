@@ -4,6 +4,17 @@ A native macOS game library and Wine bottle manager, inspired by the workflow of
 
 **Status: experimental.** The initial macOS CI build passed compilation, unit tests, and app packaging. Real games and individual Mac models still need testing. Wine and graphics runtimes are supplied separately.
 
+## macOS testers wanted
+
+I develop Miras without access to a Mac and need help checking it on real hardware. **The latest verified build passed 24 automated tests; that does not verify the GUI or game compatibility.**
+
+- **Start small:** open the app and report whether the interface works. No Wine installation is needed for this first check.
+- **Already use Wine on macOS?** Help test a fresh bottle, Windows configuration, and a simple Windows executable before trying games or mods.
+- **Builds:** check [Releases](https://github.com/Erkosh-IT/miras/releases) for tester packages. The [verified CI build](https://github.com/Erkosh-IT/miras/actions/runs/39952961630) also has a `Miras-macOS` artifact (GitHub sign-in may be required).
+- **Instructions:** follow the [short testing guide](docs/TESTING.md), then [submit your result](https://github.com/Erkosh-IT/miras/issues/new?template=macos-test.yml). Successful runs are useful too.
+
+The app is ad-hoc signed and **not Apple-notarized**. Please report the exact first-launch message if macOS blocks it. Real screenshots from testers are welcome; no GUI screenshots have been verified yet.
+
 ## Features
 
 - Native SwiftUI game library with saved executable paths and launch arguments.
