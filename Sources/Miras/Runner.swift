@@ -3,6 +3,25 @@ import MirasCore
 
 /// Log to a file rather than pipes so verbose games cannot block on a full pipe.
 enum Runner {
+    /// Starts a long-lived client without waiting for its Windows process to exit.
+    static func start(_ command: WineCommand, log: URL) throws -> Process {
+        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
+        let handle = try FileHandle(forWritingTo: log)
+        let process = Process()
+        do {
+            try handle.seekToEnd()
+            process.executableURL = command.executable
+            process.arguments = command.arguments
+            process.environment = command.environment
+            process.currentDirectoryURL = command.workingDirectory
+            process.standardOutput = handle; process.standardError = handle
+            process.standardInput = FileHandle.nullDevice
+            process.terminationHandler = { _ in try? handle.close() }
+            try process.run()
+            return process
+        } catch { try? handle.close(); throw error }
+    }
     static func run(_ command: WineCommand, log: URL) async throws -> Int32 {
         try await withCheckedThrowingContinuation { continuation in
             do {

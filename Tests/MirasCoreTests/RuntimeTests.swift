@@ -33,6 +33,55 @@ final class RuntimeTests: XCTestCase {
         XCTAssertEqual(library.games[0].options, LaunchSettings())
         XCTAssertEqual(library.configuration, RuntimeConfiguration())
     }
+    func testExistingLaunchSettingsDecodeWithoutMods() throws {
+        let json = """
+        {"graphics":"Engine built-ins","synchronization":"Off","rosetta":false,"dependencies":[]}
+        """
+        let options = try JSONDecoder().decode(LaunchSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(options.mods, ModSettings())
+    }
+    func testModOverridesAreValidatedAndGraphicsStayManaged() throws {
+        var settings = ModSettings()
+        settings.dllOverrides = "winmm=n\nsteam_api64=n,b\nonlinefix64=n\nsteamoverlay64=n\ndnet=n"
+        XCTAssertEqual(try settings.overrides()["winmm"], "n")
+        settings.dllOverrides = "dxgi=n"
+        XCTAssertThrowsError(try settings.overrides())
+        settings.dllOverrides = "winmm=n;other=n"
+        XCTAssertThrowsError(try settings.overrides())
+        settings.dllOverrides = "../winmm=n"
+        XCTAssertThrowsError(try settings.overrides())
+    }
+    func testBatchLaunchKeepsWorkingDirectoryAndQuotesSpaces() throws {
+        let engine = try file("wine", executable: true)
+        let batch = try file("mod folder/launch.bat")
+        var game = Game(bottleID: UUID(), name: "Mod", executable: batch.path, arguments: ["config with spaces.toml"])
+        game.options.mods.dllOverrides = "winmm=n"
+        let command = try WineCommand.launch(engine: engine, prefix: root, game: game)
+        XCTAssertEqual(Array(command.arguments.prefix(4)), ["cmd", "/d", "/s", "/c"])
+        XCTAssertTrue(command.arguments[4].hasPrefix("\"\"Z:"))
+        XCTAssertTrue(command.arguments[4].contains("\"config with spaces.toml\""))
+        XCTAssertEqual(command.workingDirectory?.path, batch.deletingLastPathComponent().path)
+        XCTAssertTrue(command.environment["WINEDLLOVERRIDES"]!.contains("winmm=n"))
+        game.arguments = ["%PATH% & another.exe"]
+        XCTAssertThrowsError(try WineCommand.launch(engine: engine, prefix: root, game: game))
+    }
+    func testSteamUsesBottleClientAndExcludesGameOverrides() throws {
+        let engine = try file("wine", executable: true)
+        let steam = try file("prefix/drive_c/Program Files (x86)/Steam/steam.exe")
+        var game = Game(bottleID: UUID(), name: "Mod", executable: try pe("x64").path)
+        game.options.mods.steamURL = "steam://run/480"
+        game.options.mods.dllOverrides = "winmm=n"
+        let prefix = root.appendingPathComponent("prefix")
+        let command = try WineCommand.steam(engine: engine, prefix: prefix, game: game, configuration: RuntimeConfiguration())
+        XCTAssertEqual(command.arguments, [steam.path, "steam://run/480"])
+        XCTAssertEqual(command.environment["WINEPREFIX"], prefix.path)
+        XCTAssertNil(command.environment["WINEDLLOVERRIDES"])
+        game.options.mods.steamURL = "https://example.com"
+        XCTAssertThrowsError(try WineCommand.steam(engine: engine, prefix: prefix, game: game, configuration: RuntimeConfiguration()))
+        game.options.mods.steamURL = ""
+        game.options.mods.steamExecutable = try file("outside/steam.exe").path
+        XCTAssertThrowsError(try WineCommand.steam(engine: engine, prefix: prefix, game: game, configuration: RuntimeConfiguration()))
+    }
     func testSyncCapabilityAndRosettaArgumentBoundaries() throws {
         let engine = try file("engine with spaces/bin/wine", executable: true)
         var game = Game(bottleID: UUID(), name: "Game", executable: try pe("x64").path, arguments: ["one two"])

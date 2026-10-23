@@ -40,6 +40,29 @@ public struct WineCommand {
         var command = try WineCommand(engine: engine, prefix: prefix, arguments: [game.executable] + game.arguments,
                                workingDirectory: URL(fileURLWithPath: game.executable).deletingLastPathComponent())
         let options = game.options
+        let customOverrides = try options.mods.overrides()
+        let extensionName = URL(fileURLWithPath: game.executable).pathExtension.lowercased()
+        let isBatch = ["bat", "cmd"].contains(extensionName)
+        guard isBatch || extensionName == "exe" else { throw ConfigurationError("Choose an .exe, .bat, or .cmd launcher.") }
+        if isBatch {
+            let windowsPath = "Z:" + game.executable.replacingOccurrences(of: "/", with: "\\")
+            let tokens = [windowsPath] + game.arguments
+            // cmd.exe parses these a second time. Reject expansion/control syntax
+            // instead of claiming that Process argument boundaries protect it.
+            let forbidden = CharacterSet(charactersIn: "\"&|<>^%!\r\n\u{0}")
+            guard tokens.allSatisfy({ $0.rangeOfCharacter(from: forbidden) == nil }) else {
+                throw ConfigurationError("Batch paths and arguments cannot contain quotes, shell operators, or expansion characters. Use the mod's .exe launcher for those arguments.")
+            }
+            let line = tokens.map { "\"\($0)\"" }.joined(separator: " ")
+            command.arguments = ["cmd", "/d", "/s", "/c", "\"" + line + "\""]
+        }
+        func targetArchitecture() throws -> String {
+            if isBatch {
+                guard ["x64", "x32"].contains(options.mods.batchArchitecture) else { throw ConfigurationError("Select the batch launcher's game architecture.") }
+                return options.mods.batchArchitecture
+            }
+            return try GraphicsRuntime.architecture(of: URL(fileURLWithPath: game.executable))
+        }
         guard options.synchronization != .esync || configuration.supportsESync else { throw ConfigurationError("This engine has not been configured for ESync.") }
         guard options.synchronization != .msync || configuration.supportsMSync else { throw ConfigurationError("This engine has not been configured for MSync.") }
         command.environment["WINEESYNC"] = options.synchronization == .esync ? "1" : "0"
@@ -49,7 +72,10 @@ public struct WineCommand {
         let retainedOverrides = (command.environment["WINEDLLOVERRIDES"] ?? "").split(separator: ";").compactMap { entry -> String? in
             let pair = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard pair.count == 2 else { return nil }
-            let names = pair[0].split(separator: ",").filter { !managed.contains($0.trimmingCharacters(in: .whitespaces).lowercased()) }
+            let names = pair[0].split(separator: ",").filter {
+                let name = $0.trimmingCharacters(in: .whitespaces).lowercased()
+                return !managed.contains(name) && customOverrides[name] == nil
+            }
             return names.isEmpty ? nil : names.joined(separator: ",") + "=" + String(pair[1])
         }
         let builtins = "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,d3d12=b"
@@ -57,12 +83,12 @@ public struct WineCommand {
         case .wine: command.environment["WINEDLLOVERRIDES"] = builtins
         case .d3dMetal:
             guard configuration.d3dMetalReady else { throw ConfigurationError("Configure a GPTK-compatible engine with Apple's D3DMetal components in Engine settings first.") }
-            guard try GraphicsRuntime.architecture(of: URL(fileURLWithPath: game.executable)) == "x64" else { throw ConfigurationError("D3DMetal requires a 64-bit Windows executable.") }
+            guard try targetArchitecture() == "x64" else { throw ConfigurationError("D3DMetal requires a 64-bit Windows executable.") }
             command.environment["WINEDLLOVERRIDES"] = builtins
         case .dxvk:
             guard !configuration.dxvkPath.isEmpty else { throw ConfigurationError("Choose a macOS DXVK package in Engine settings first.") }
             let package = URL(fileURLWithPath: configuration.dxvkPath)
-            let architecture = try GraphicsRuntime.architecture(of: URL(fileURLWithPath: game.executable))
+            let architecture = try targetArchitecture()
             let names = ["d3d9", "d3d10", "d3d10_1", "d3d10core", "d3d11", "dxgi"]
             let native = names.filter { FileManager.default.fileExists(atPath: package.appendingPathComponent("\(architecture)/\($0).dll").path) }
             guard native.contains("d3d11"), native.contains("dxgi") else { throw ConfigurationError("The DXVK package is missing \(architecture)/d3d11.dll or \(architecture)/dxgi.dll.") }
@@ -72,9 +98,32 @@ public struct WineCommand {
         if !retainedOverrides.isEmpty {
             command.environment["WINEDLLOVERRIDES"]! += ";" + retainedOverrides.joined(separator: ";")
         }
+        if !customOverrides.isEmpty {
+            command.environment["WINEDLLOVERRIDES"]! += ";" + customOverrides.keys.sorted().map { "\($0)=\(customOverrides[$0]!)" }.joined(separator: ";")
+        }
         if options.rosetta {
             command.arguments = ["-x86_64", engine.path] + command.arguments
             command.executable = URL(fileURLWithPath: "/usr/bin/arch")
+        }
+        return command
+    }
+
+    public static func steam(engine: URL, prefix: URL, game: Game, configuration: RuntimeConfiguration) throws -> WineCommand {
+        let selected = game.options.mods.steamExecutable
+        let steam = selected.isEmpty ? prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steam.exe") : URL(fileURLWithPath: selected)
+        guard steam.resolvingSymlinksInPath().path.hasPrefix(prefix.resolvingSymlinksInPath().path + "/"),
+              steam.lastPathComponent.lowercased() == "steam.exe", FileManager.default.fileExists(atPath: steam.path) else {
+            throw ConfigurationError("Select steam.exe installed inside this game's bottle, or install Steam in its default location there.")
+        }
+        let uri = try game.options.mods.validatedSteamURL()
+        let gameCommand = try launch(engine: engine, prefix: prefix, game: game, configuration: configuration)
+        var command = try WineCommand(engine: engine, prefix: prefix, arguments: [steam.path] + (uri.map { [$0] } ?? ["-silent"]), workingDirectory: steam.deletingLastPathComponent())
+        for key in ["WINEESYNC", "WINEMSYNC", "WINEFSYNC"] { command.environment[key] = gameCommand.environment[key] }
+        // The game's mod DLLs must not be injected into the Steam client.
+        command.environment.removeValue(forKey: "WINEDLLOVERRIDES")
+        if game.options.rosetta {
+            command.executable = URL(fileURLWithPath: "/usr/bin/arch")
+            command.arguments = ["-x86_64", engine.path] + command.arguments
         }
         return command
     }

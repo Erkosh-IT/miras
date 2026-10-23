@@ -2,7 +2,7 @@
 
 A native macOS game library and Wine bottle manager, inspired by the workflow of CrossOver. Built with SwiftUI, Foundation, and no third-party app dependencies. This is an initial implementation, not a replacement for CrossOver's compatibility engine or support service.
 
-**Status: experimental.** Source syntax and packaging checks have passed on Windows. Compilation, automated tests, and real game execution still need validation on macOS. Wine and graphics runtimes are supplied separately.
+**Status: experimental.** The initial macOS CI build passed compilation, unit tests, and app packaging. Real games and individual Mac models still need testing. Wine and graphics runtimes are supplied separately.
 
 ## Features
 
@@ -14,6 +14,8 @@ A native macOS game library and Wine bottle manager, inspired by the workflow of
 - Optional ESync, MSync, and x86_64/Rosetta launch settings.
 - Selected Winetricks dependencies installed before a game launches.
 - Per-operation logs and bottle-scoped process controls.
+- Persistent per-bottle Steam sessions with optional Steam launch URLs.
+- Custom mod DLL overrides and `.exe`, `.bat`, or `.cmd` launcher targets.
 
 ## Project structure
 
@@ -42,7 +44,7 @@ bash scripts/build-app.sh
 open dist/Miras.app
 ```
 
-The script runs the unit tests, compiles for the current Mac's architecture, and packages an ad-hoc signed `.app`. A distributable release would additionally need a Developer ID signature and Apple notarization. The GitHub workflow runs the same build and produces a zipped app when this project is pushed to GitHub; it has not been run from this workspace.
+The script runs unit tests on the build host and compiles a universal `arm64` / `x86_64`, ad-hoc signed `.app`. Its Apple silicon binary targets M1, M2, M3, and M4 Macs running macOS 13 or newer. A selected Wine engine or GPTK release can require a newer macOS version. This architecture support does not certify any game's compatibility or frame rate. A distributable release would additionally need a Developer ID signature and Apple notarization. The [GitHub workflow](https://github.com/Erkosh-IT/miras/actions/workflows/macos.yml) runs the build and produces a zipped app artifact.
 
 For development, use `swift run Miras`. To run just the tests, use `swift test`.
 
@@ -51,7 +53,7 @@ For development, use `swift run Miras`. To run just the tests, use `swift test`.
 1. Open **Engine settings → Find installed Wine**, or **Choose binary…** to select your engine's `wine` / `wine64` executable. In the file picker, Command–Shift–G lets you enter a directory inside an `.app` bundle.
 2. Choose **New bottle**, name it, and wait for Wine to initialize its Windows environment. Wine may show its own setup dialogs.
 3. Choose **Install new game…** to automatically create and initialize a separate bottle for an `.exe` or `.msi` installer. To deliberately install into the selected existing bottle, use **Run installer**. Complete the Windows installer normally.
-4. Choose **Add game**, browse the bottle's `drive_c`, and select the installed game's `.exe`. You can also select an existing portable game's executable outside the bottle.
+4. Choose **Add game**, browse the bottle's `drive_c`, and select the game or mod's `.exe`, `.bat`, or `.cmd`. You can also select an existing portable game's executable outside the bottle.
 5. Click **Play**. Use the game's menu to edit its name, executable path, or arguments (one argument per line, without shell quotes).
 
 The bottle's **…** menu opens its files, launches `winecfg`, opens its latest log, or stops all Windows programs in that bottle. Stopping a bottle asks for confirmation because it can discard unsaved game progress. Removing a game removes only its library shortcut.
@@ -82,6 +84,29 @@ Dependencies are user-selected because an arbitrary executable does not reliably
 
 One engine selection is shared across the library. Back up your bottles before switching engines or importing GPTK: Wine can upgrade a prefix, and downgrading it may not work. Choose engines with compatible macOS support; arbitrary Linux Wine binaries cannot be used. Switching the selected engine clears capability declarations so they must be configured again.
 
+## Steam and mod launchers
+
+1. Install Windows Steam inside the game's bottle and configure the game's graphics, synchronization, and dependencies.
+2. In **Edit game & arguments**, leave the Steam path blank for `C:\Program Files (x86)\Steam\steam.exe`, or enter another `steam.exe` path inside the same bottle.
+3. Optionally enter `steam://run/<AppID>` or `steam://rungameid/<AppID>`. With no URL, Miras requests the Steam client with `-silent`. URLs are passed directly to that Windows Steam client, never macOS Steam.
+4. Save and choose **Start Steam / open Steam URL** in the game's menu. Miras prepares dependencies and graphics before starting Steam. Sign in and wait for Steam to be ready, then click **Play**. Starting a process does not confirm Steam login or network readiness.
+5. Steam stays running when the game launcher exits. Use **Stop bottle programs** to close the session. Stop before changing graphics, synchronization, dependencies, or the selected engine. Session tracking is in memory; after restarting Miras, close existing bottle programs or use Stop before preparing another session.
+
+The session locks its runtime profile while allowing different executable targets and mod DLL overrides. During a Steam session, Miras tracks the launched game's loader process rather than waiting for the entire wineserver to exit. Detached games may outlive that loader; session settings remain locked until the bottle stops. Log files capture process errors, but Steam login and game readiness are not automatically detected.
+
+The DLL override editor accepts one entry per line:
+
+```text
+winmm=n
+version=n,b
+```
+
+Modes are `n` (native), `b` (built-in), `n,b`, `b,n`, or an empty value to disable a DLL. Names omit `.dll`. Other mod-specific names can be entered as needed; Miras neither supplies those DLLs nor enables them by default. Overrides apply to the game and its children, not the Steam client. Graphics DLL overrides remain controlled by the graphics picker.
+
+For Mod Engine 2, target `modengine2_launcher.exe` with its documented arguments, or its supplied batch file. Miras uses the launcher's directory as the working directory and preserves the bottle. Batch launchers run through Wine's `cmd /d /s /c`; select their target game's architecture explicitly. To prevent unintended command expansion, batch paths and arguments containing quotes, `%`, `!`, `&`, `|`, `<`, `>`, or `^` are rejected. Use the executable launcher when such arguments are necessary. See the [Mod Engine 2 launcher example](https://github.com/soulsmods/ModEngine2/blob/main/installer/dist/launchmod_eldenring.bat).
+
+Valve documents [Spacewar as a Steamworks sample application](https://partner.steamgames.com/doc/sdk/api/example). Opening AppID 480 is not a general co-op or anti-cheat fix. [Seamless Co-op's installation guide](https://ersc-docs.github.io/) requires each player to own the game on Steam. No AppID spoofing, anti-cheat modification, or networking patch is automatically installed by Miras. Elden Ring / Seamless Co-op and Dark Souls III / Archthrones have not been gameplay-tested here; choose D3DMetal or DXVK according to the actual engine and mod behavior rather than a guaranteed preset.
+
 ## Data and operation behavior
 
 Everything is stored at `~/Library/Application Support/Miras/`:
@@ -94,10 +119,10 @@ Everything is stored at `~/Library/Application Support/Miras/`:
 
 Use **Data folder** to inspect or back up these files. Library saves use atomic replacement. If the library is unreadable, Miras leaves it intact and disables edits until you repair it and restart. A failed bottle creation keeps its unfinished prefix for troubleshooting; it is not added to the library. You may remove that unused UUID directory manually after checking its log and ensuring no Wine processes use it.
 
-Each bottle runs one tracked operation at a time; separate bottles can run concurrently. Launch and installation workflows wait for the prefix's `wineserver -w`, keeping the bottle busy until detached child programs close. Before dependency or DLL changes, launch workflows also wait for previous bottle programs, including those left after restarting Miras. An open launcher can keep a bottle busy; close it or use **Stop bottle programs**, which uses `wineserver -k` and cancels remaining steps in the active launch workflow. The engine must have a sibling `wineserver`. Closing Miras does not shut down Wine or running games. Latest-log links reset when Miras restarts; all log files remain in the data folder. Logs are not automatically pruned.
+Each bottle runs one tracked operation at a time; separate bottles can run concurrently. Outside prepared Steam sessions, launch and installation workflows wait for the prefix's `wineserver -w`, keeping the bottle busy until detached child programs close. Before dependency or DLL changes, launch workflows also wait for previous bottle programs, including those left after restarting Miras. An open launcher can keep a bottle busy; close it or use **Stop bottle programs**, which uses `wineserver -k` and cancels remaining steps in the active launch workflow. The engine must have a sibling `wineserver`. Closing Miras does not shut down Wine or running games. Latest-log links reset when Miras restarts; all log files remain in the data folder. Logs are not automatically pruned.
 
 Wine is a compatibility layer, not a security sandbox. Windows programs run with your macOS user's file access. Run software you trust.
 
 ## Validation status
 
-Core tests cover library persistence, old-library migration, corruption handling, prefix isolation, literal argument passing, installer dispatch, renderer architecture checks, DXVK backups, GPTK import isolation, synchronization settings, and Winetricks commands. Swift sources pass a tree-sitter syntax parse; the packaging script passes Bash syntax checking and the app manifest passes plist validation on Windows. These checks do not type-check Swift or execute the XCTest suite. A macOS CI workflow is included. Swift compilation, macOS UI behavior, and real Wine/game execution still need validation on a Mac; this project was authored on Windows without a Swift toolchain.
+Core tests cover library persistence, old-library migration, corruption handling, prefix isolation, argument handling, batch quoting, Steam client scoping, DLL override validation, renderer architecture checks, DXVK backups, GPTK import isolation, synchronization settings, and Winetricks commands. The initial macOS CI run passed compilation, tests, and packaging; consult the latest workflow for subsequent changes. GUI interactions, Steam sessions, real Wine/game execution, and individual M1/M2/M3/M4 hardware remain unverified.

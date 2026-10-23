@@ -13,6 +13,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var storageReady = false
     let store: LibraryStore
     private var workflowTasks: [UUID: Task<Void, Never>] = [:]
+    @Published private(set) var steamSessions: [UUID: LaunchSettings] = [:]
+    private var steamProcesses: [UUID: Process] = [:]
+    @Published private(set) var stopping: Set<UUID> = []
+    var runtimeLocked: Bool { !busy.isEmpty || !steamSessions.isEmpty || !stopping.isEmpty }
 
     var selectedBottle: Bottle? { library.bottles.first { $0.id == selection } }
     var engineReady: Bool { FileManager.default.isExecutableFile(atPath: library.enginePath) }
@@ -45,6 +49,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseEngine() {
+        guard !runtimeLocked else { return }
         let panel = NSOpenPanel()
         panel.title = "Select the wine or wine64 executable"
         panel.message = "Select the Wine binary inside your engine's bin directory. Use Command–Shift–G to enter a path inside an app bundle."
@@ -59,6 +64,7 @@ final class AppModel: ObservableObject {
     }
 
     func discoverEngine() {
+        guard !runtimeLocked else { return }
         let candidates = [
             "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine",
             "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine",
@@ -115,12 +121,12 @@ final class AppModel: ObservableObject {
     }
 
     func saveConfiguration(_ configuration: RuntimeConfiguration) {
-        guard busy.isEmpty else { return }
+        guard !runtimeLocked else { return }
         commit { $0.configuration = configuration }
     }
 
     func importD3DMetal() {
-        guard canRun, busy.isEmpty else { return }
+        guard canRun, !runtimeLocked else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose Apple's GPTK redist/lib folder"
         panel.message = "Miras will copy the selected Wine engine and merge these libraries into that private copy. Use a Wine build compatible with this GPTK release."
@@ -147,12 +153,12 @@ final class AppModel: ObservableObject {
 
     func addGame(to bottle: Bottle) {
         let panel = NSOpenPanel()
-        panel.title = "Add a game's .exe to the library"
+        panel.title = "Add a game or mod launcher (.exe, .bat, .cmd)"
         panel.message = "Browse this bottle's drive_c to find the installed game's executable."
         panel.directoryURL = store.prefix(for: bottle).appendingPathComponent("drive_c")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard url.pathExtension.lowercased() == "exe" else {
-            errorMessage = "Choose a Windows .exe file."; return
+        guard ["exe", "bat", "cmd"].contains(url.pathExtension.lowercased()) else {
+            errorMessage = "Choose a Windows .exe, .bat, or .cmd launcher."; return
         }
         let game = Game(bottleID: bottle.id, name: url.deletingPathExtension().lastPathComponent, executable: url.path)
         commit { $0.games.append(game) }
@@ -166,6 +172,42 @@ final class AppModel: ObservableObject {
 
     func removeGame(_ game: Game) { commit { $0.games.removeAll { $0.id == game.id } } }
 
+    private func sessionProfile(_ game: Game) -> LaunchSettings {
+        var options = game.options
+        var mods = ModSettings()
+        mods.steamExecutable = options.mods.steamExecutable
+        options.modSettings = mods
+        return options
+    }
+
+    func startSteam(for game: Game, in bottle: Bottle) {
+        let selectedEngine = engine
+        let configuration = library.configuration
+        let prefix = store.prefix(for: bottle)
+        workflow(bottle: bottle, title: "Starting Steam") { [self] log in
+            let command = try WineCommand.steam(engine: selectedEngine, prefix: prefix, game: game, configuration: configuration)
+            let profile = sessionProfile(game)
+            if let existing = steamSessions[bottle.id] {
+                guard existing == profile else { throw ConfigurationError("Stop this bottle before changing graphics, synchronization, dependencies, or Steam installation.") }
+            } else {
+                let wait = try WineCommand.wait(engine: selectedEngine, prefix: prefix)
+                status = "Preparing Steam session; waiting for previous bottle programs to exit…"
+                try await checkedRun(wait, log: log)
+                if !game.options.dependencies.isEmpty {
+                    try await checkedRun(WineCommand.dependencies(engine: selectedEngine, prefix: prefix,
+                        tool: URL(fileURLWithPath: configuration.winetricksPath), verbs: game.options.dependencies), log: log)
+                    try await checkedRun(wait, log: log)
+                }
+                if game.options.graphics == .dxvk {
+                    try GraphicsRuntime.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+                }
+            }
+            try Task.checkCancellation()
+            steamProcesses[bottle.id] = try Runner.start(command, log: log)
+            steamSessions[bottle.id] = profile
+        }
+    }
+
     func launch(_ game: Game, in bottle: Bottle) {
         let selectedEngine = engine
         let configuration = library.configuration
@@ -173,25 +215,31 @@ final class AppModel: ObservableObject {
         workflow(bottle: bottle, title: "Running \(game.name)") { [self] log in
             let launch = try WineCommand.launch(engine: selectedEngine, prefix: prefix, game: game, configuration: configuration)
             let wait = try WineCommand.wait(engine: selectedEngine, prefix: prefix)
-            var dependencies: WineCommand?
-            if !game.options.dependencies.isEmpty {
-                dependencies = try WineCommand.dependencies(engine: selectedEngine, prefix: prefix,
-                    tool: URL(fileURLWithPath: configuration.winetricksPath), verbs: game.options.dependencies)
+            let session = steamSessions[bottle.id]
+            if let session, session != sessionProfile(game) {
+                throw ConfigurationError("Stop this bottle's Steam session before changing graphics, synchronization, dependencies, or Steam installation.")
             }
-            status = "Waiting for this bottle's previous programs to close…"
-            try await checkedRun(wait, log: log)
-            if let dependencies {
-                status = "Installing selected dependencies for \(game.name)…"
-                try await checkedRun(dependencies, log: log)
+            if session == nil {
+                var dependencies: WineCommand?
+                if !game.options.dependencies.isEmpty {
+                    dependencies = try WineCommand.dependencies(engine: selectedEngine, prefix: prefix,
+                        tool: URL(fileURLWithPath: configuration.winetricksPath), verbs: game.options.dependencies)
+                }
+                status = "Waiting for this bottle's previous programs to close…"
                 try await checkedRun(wait, log: log)
-            }
-            if game.options.graphics == .dxvk {
-                try GraphicsRuntime.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+                if let dependencies {
+                    status = "Installing selected dependencies for \(game.name)…"
+                    try await checkedRun(dependencies, log: log)
+                    try await checkedRun(wait, log: log)
+                }
+                if game.options.graphics == .dxvk {
+                    try GraphicsRuntime.installDXVK(from: URL(fileURLWithPath: configuration.dxvkPath), prefix: prefix)
+                }
             }
             status = "Running \(game.name)…"
             let code = try await Runner.run(launch, log: log)
             // Keep the bottle locked even when Steam or another launcher detaches.
-            try await checkedRun(wait, log: log)
+            if session == nil { try await checkedRun(wait, log: log) }
             guard code == 0 else { throw ConfigurationError("Game process exited with code \(code).") }
         }
     }
@@ -204,7 +252,7 @@ final class AppModel: ObservableObject {
     }
 
     private func workflow(bottle: Bottle, title: String, operation: @escaping @MainActor (URL) async throws -> Void) {
-        guard canRun, busy[bottle.id] == nil else { return }
+        guard canRun, busy[bottle.id] == nil, !stopping.contains(bottle.id) else { return }
         busy[bottle.id] = title
         let log = newLog(bottle: bottle, title: title)
         workflowTasks[bottle.id] = Task {
@@ -222,16 +270,23 @@ final class AppModel: ObservableObject {
     }
 
     func stop(_ bottle: Bottle) {
-        guard canRun else { return }
+        guard canRun, !stopping.contains(bottle.id) else { return }
         let log = newLog(bottle: bottle, title: "Stop")
         do {
             let command = try WineCommand.stop(engine: engine, prefix: store.prefix(for: bottle))
+            stopping.insert(bottle.id)
             workflowTasks[bottle.id]?.cancel()
             Task {
+                defer { stopping.remove(bottle.id) }
                 do {
                     let code = try await Runner.run(command, log: log)
                     if code != 0 { errorMessage = "Wine could not stop this bottle (exit \(code)). See \(log.path)." }
-                    else { status = "Stop requested for \(bottle.name)." }
+                    else {
+                        try await checkedRun(WineCommand.wait(engine: engine, prefix: store.prefix(for: bottle)), log: log)
+                        steamSessions.removeValue(forKey: bottle.id)
+                        steamProcesses.removeValue(forKey: bottle.id)
+                        status = "Stopped programs in \(bottle.name)."
+                    }
                 } catch { errorMessage = error.localizedDescription }
             }
         } catch { errorMessage = error.localizedDescription }
@@ -253,7 +308,8 @@ final class AppModel: ObservableObject {
 
     private func perform(bottle: Bottle, title: String, command: () throws -> WineCommand,
                          onSuccess: @escaping @MainActor () -> Void = {}) {
-        guard canRun, busy[bottle.id] == nil else { return }
+        guard canRun, busy[bottle.id] == nil, !stopping.contains(bottle.id) else { return }
+        guard steamSessions[bottle.id] == nil else { errorMessage = "Stop this bottle's Steam session before running installers or changing Windows configuration."; return }
         do {
             let command = try command()
             let wait = try WineCommand.wait(engine: engine, prefix: store.prefix(for: bottle))

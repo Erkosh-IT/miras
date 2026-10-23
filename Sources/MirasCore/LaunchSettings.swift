@@ -14,6 +14,11 @@ public struct LaunchSettings: Codable, Equatable {
     public var synchronization: Synchronization = .disabled
     public var rosetta = false
     public var dependencies: [WindowsDependency] = []
+    public var modSettings: ModSettings?
+    public var mods: ModSettings {
+        get { modSettings ?? ModSettings() }
+        set { modSettings = newValue }
+    }
     public init() {}
 }
 public struct RuntimeConfiguration: Codable, Equatable {

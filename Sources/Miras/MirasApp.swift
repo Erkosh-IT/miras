@@ -111,6 +111,10 @@ struct ContentView: View {
                     .disabled(!model.storageReady || model.busy[bottle.id] != nil)
             }
             TextField("Search games", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 300)
+            if model.steamSessions[bottle.id] != nil {
+                Text("Steam session prepared · Sign in to Steam, then Play. Stop the bottle to change runtime settings.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }.padding(30)
     }
 
@@ -140,6 +144,8 @@ struct ContentView: View {
                                     .disabled(!model.canRun || model.busy[bottle.id] != nil)
                                 Menu {
                                     Button("Edit game & arguments") { editingGame = game }
+                                    Button("Start Steam / open Steam URL") { model.startSteam(for: game, in: bottle) }
+                                        .disabled(!model.canRun || model.busy[bottle.id] != nil)
                                     Button("Show executable") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.executable)]) }
                                     Button("Remove from library", role: .destructive) { model.removeGame(game) }
                                 } label: { Image(systemName: "ellipsis") }.fixedSize()
@@ -201,7 +207,7 @@ struct EngineView: View {
             HStack {
                 Button("Find installed Wine") { model.discoverEngine() }
                 Button("Choose binary…") { model.chooseEngine() }
-            }.disabled(!model.storageReady || !model.busy.isEmpty)
+            }.disabled(!model.storageReady || model.runtimeLocked)
             Group {
                 Button("Import GPTK D3DMetal libraries…") { model.saveConfiguration(configuration); model.importD3DMetal() }
                 Toggle("Engine already includes compatible D3DMetal", isOn: $configuration.d3dMetalReady)
@@ -216,7 +222,7 @@ struct EngineView: View {
                     Button("Browse…") { choosePath(directory: false) { configuration.winetricksPath = $0 } }
                 }
                 Text("DXVK requires a macOS-compatible build and an engine with MoltenVK. Enable synchronization options only when supported by this engine.").font(.caption).foregroundStyle(.secondary)
-            }.disabled(!model.busy.isEmpty || !model.storageReady)
+            }.disabled(model.runtimeLocked || !model.storageReady)
             Link("Wine for macOS documentation", destination: URL(string: "https://gitlab.winehq.org/wine/wine/-/wikis/MacOS")!)
             Text("Use a compatible engine for each existing bottle. Changing engines can change or upgrade bottle data. Back up the data folder first.").font(.caption).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Done") { model.saveConfiguration(configuration); dismiss() }.keyboardShortcut(.defaultAction) }
@@ -239,10 +245,17 @@ struct GameEditor: View {
     @State var game: Game
     @State private var argumentLines = ""
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Game settings").font(.title2.bold())
             TextField("Name", text: $game.name)
             TextField("Absolute executable path", text: $game.executable)
+            if ["bat", "cmd"].contains(URL(fileURLWithPath: game.executable).pathExtension.lowercased()) {
+                Picker("Batch target architecture", selection: $game.options.mods.batchArchitecture) {
+                    Text("64-bit").tag("x64")
+                    Text("32-bit").tag("x32")
+                }
+            }
             Picker("Graphics", selection: $game.options.graphics) {
                 ForEach(GraphicsBackend.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
@@ -250,6 +263,11 @@ struct GameEditor: View {
                 ForEach(Synchronization.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             Toggle("Launch x86_64 Wine (Rosetta on Apple silicon)", isOn: $game.options.rosetta)
+            Text("Mod DLL overrides: one name=mode per line (n = native, b = built-in)").font(.caption)
+            TextEditor(text: $game.options.mods.dllOverrides).font(.system(.body, design: .monospaced)).frame(height: 70)
+            TextField("Steam.exe path inside this bottle (blank = default)", text: $game.options.mods.steamExecutable)
+            TextField("Optional steam://run/<AppID>", text: $game.options.mods.steamURL)
+            Text("Save, then use the game's menu to start Steam. Sign in before pressing Play. Stop the bottle before changing graphics or dependencies.").font(.caption).foregroundStyle(.secondary)
             Text("Install selected dependencies before launch").font(.caption)
             HStack {
                 ForEach(WindowsDependency.allCases, id: \.self) { dependency in
@@ -270,7 +288,8 @@ struct GameEditor: View {
                     model.updateGame(game); dismiss()
                 }.keyboardShortcut(.defaultAction).disabled(game.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !game.executable.hasPrefix("/"))
             }
-        }.textFieldStyle(.roundedBorder).padding(28).frame(width: 480)
+        }.textFieldStyle(.roundedBorder).padding(28)
+        }.frame(width: 560, height: 700)
             .onAppear { argumentLines = game.arguments.joined(separator: "\n") }
     }
 }

@@ -8,8 +8,8 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 swift test
-swift build -c release
-BIN_DIR="$(swift build -c release --show-bin-path)"
+swift build -c release --arch arm64 --arch x86_64
+BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
 APP="$PWD/dist/Miras.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Miras" "$APP/Contents/MacOS/Miras"
